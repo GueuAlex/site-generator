@@ -1,0 +1,21 @@
+{
+  "name": "kit-sites-vitrines",
+  "private": true,
+  "description": "Kit DIGIFAZ : sites vitrines de demonstration avec Claude Code et Kimi (recherche, cahier des charges, construction, verification, livraison)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "prospect": "node scripts/prospect.mjs",
+    "kimi": "node scripts/kimi.mjs",
+    "verifier": "node scripts/verifier.mjs",
+    "servir": "node scripts/servir.mjs",
+    "livrer": "node scripts/livrer.mjs",
+    "statut": "node scripts/suivi.mjs",
+    "conso": "node scripts/conso.mjs"
+  },
+  "dependencies": {
+    "openai": "7.45.1"
+  }
+}

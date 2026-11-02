@@ -1,0 +1,23 @@
+# Depot PUBLIC : seul le kit commun est versionne (liste blanche).
+# Tout le reste (vos sites, votre .env, votre suivi, vos livraisons, l'Excel) reste sur votre ordinateur.
+/*
+!/.gitignore
+!/.gitattributes
+!/.claude/
+!/scripts/
+!/_modeles/
+!/CLAUDE.md
+!/README.md
+!/DEMARRAGE.md
+!/package.json
+!/package-lock.json
+!/.env.example
+
+# Reglages personnels de Claude Code
+/.claude/*
+!/.claude/commands/
+
+# Fichiers systeme
+.DS_Store
+Thumbs.db
+desktop.ini

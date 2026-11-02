@@ -1,0 +1,5 @@
+# Fins de ligne normalisees (LF) pour que Windows, Linux et macOS partagent les memes fichiers
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webp binary
