@@ -72,15 +72,18 @@ Les commandes sont dans `.claude/commands/`. Outils (tous en Node.js, dans `scri
 | Outil | Rôle |
 |---|---|
 | `prospect.mjs` | lecture seule de l'Excel (`<N°>` ou `--liste`) |
-| `kimi.mjs` | appels à Kimi (`build`, `fix`, `modeles`) |
+| `kimi.mjs` | appels à Kimi ou à DeepSeek (`build`, `fix`, `modeles`) |
+| `fournisseurs.mjs` | réglages et tarifs de chaque IA (Kimi, DeepSeek) |
 | `verifier.mjs` | contrôles du site généré |
 | `servir.mjs` | serveur local pour relire un site |
 | `capture.mjs` | captures desktop et mobile (Chrome, Edge ou Chromium en mode headless) |
 | `livrer.mjs` | zip de livraison et copie de la note |
 | `suivi.mjs` | avancement des sites (`suivi.csv`) |
-| `conso.mjs` | solde du compte Kimi et coût estimé de chaque appel |
+| `conso.mjs` | soldes des comptes Kimi et DeepSeek, coût de chaque appel |
 
 Kimi K3.1 raisonne toujours avant de répondre : `KIMI_REASONING_EFFORT=low` (défaut du script) garde un build autour de 9 minutes ; « max », le défaut de l'API, fait couper la connexion avant la réponse. Le script reprend automatiquement une réponse coupée ou interrompue. Modèles de documents : `_modeles/`.
+
+**DeepSeek, second fournisseur (en test).** Kimi reste le fournisseur par défaut. Pour DeepSeek, ajouter `--fournisseur deepseek` à `build`, `fix` et `modeles` (clé `DEEPSEEK_API_KEY` dans `.env`, modèle `DEEPSEEK_MODEL`, `deepseek-v4-pro` par défaut). Pour comparer avec la version Kimi sans l'écraser, ajouter `--sortie site-deepseek` (le site est alors écrit dans `<slug>/site-deepseek/`, à contrôler avec `node scripts/verifier.mjs <slug> --sortie site-deepseek`) ; seule la version placée dans `<slug>/site/` est livrée. DeepSeek coûte moitié prix en heures creuses (hors 1 h – 4 h et 6 h – 10 h UTC, du lundi au vendredi) ; `deepseek-v4-pro` ne lit pas les images (le logo SVG reste envoyé). Chaque appel enregistre son fournisseur dans `couts.json`.
 
 ### Arborescence
 

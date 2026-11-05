@@ -1,20 +1,25 @@
 #!/usr/bin/env node
-// Controles automatiques d'un site genere par Kimi (section 7 du brief), avant revue et livraison.
-//   node scripts/verifier.mjs <slug>
+// Controles automatiques d'un site genere par l'IA (Kimi ou DeepSeek), avant revue et livraison.
+//   node scripts/verifier.mjs <slug> [--sortie site-xxx]
+// --sortie : dossier a controler (defaut : site), ex. site-deepseek.
 // Code de sortie : 0 si aucune erreur (les avertissements restent a verifier a la main), 1 sinon.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, normalize, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Script } from "node:vm";
 
 const RACINE = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const slug = process.argv[2];
-if (!slug || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-  console.error("Usage : node scripts/verifier.mjs <slug>");
+const args = process.argv.slice(2);
+const iSortie = args.indexOf("--sortie");
+const sortie = iSortie === -1 ? "site" : args.splice(iSortie, 2)[1];
+const slug = args[0];
+if (!slug || !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug) || !/^site(-[a-z0-9]+)*$/.test(sortie || "")) {
+  console.error("Usage : node scripts/verifier.mjs <slug> [--sortie site-xxx]");
   process.exit(1);
 }
 const DOSSIER = join(RACINE, slug);
-const SITE = join(DOSSIER, "site");
+const SITE = join(DOSSIER, sortie);
 
 // Domaines externes autorises (voir CLAUDE.md, « Livraison des sites »)
 const DOMAINES_AUTORISES = ["cdn.tailwindcss.com", "cdn.jsdelivr.net", "fonts.googleapis.com", "fonts.gstatic.com", "www.google.com", "maps.google.com", "wa.me", "api.whatsapp.com",
@@ -28,7 +33,7 @@ const lister = (d) =>
   !existsSync(d) ? [] : readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? lister(join(d, e.name)) : [join(d, e.name)]));
 const rel = (f) => relative(SITE, f).split(sep).join("/");
 
-if (!existsSync(join(SITE, "index.html"))) erreurs.push("index.html absent de site/.");
+if (!existsSync(join(SITE, "index.html"))) erreurs.push(`index.html absent de ${sortie}/.`);
 const fichiers = lister(SITE);
 const pages = fichiers.filter((f) => f.endsWith(".html"));
 const textes = fichiers.filter((f) => /\.(html|css|js|json|svg|txt|xml|webmanifest)$/.test(f));
@@ -45,8 +50,11 @@ for (const f of textes) {
   ];
   for (const brut of refs) {
     const ref = brut.trim();
-    if (!ref || ref.startsWith("data:") || ref.startsWith("javascript:") || /^(mailto|tel|sms):/i.test(ref) || ref.includes("${")) continue;
+    // %23… : reference interne a un SVG encode dans une data URI (ex. filter='url(%23n)')
+    if (!ref || ref.startsWith("data:") || ref.startsWith("%23") || ref.startsWith("javascript:") || /^(mailto|tel|sms):/i.test(ref) || ref.includes("${")) continue;
     if (/^(https?:)?\/\//i.test(ref)) {
+      // Les fichiers de GSAP sont sous /dist/ sur jsDelivr : sans lui, 404 et aucune animation
+      if (/cdn\.jsdelivr\.net\/npm\/gsap@[^/]+\/(?!dist\/)/.test(ref)) erreurs.push(`${rel(f)} : GSAP chargé sans « /dist/ » (« ${ref} ») : le fichier est introuvable.`);
       externes.add(new URL(ref.startsWith("//") ? `https:${ref}` : ref).hostname);
       continue;
     }
@@ -77,6 +85,27 @@ for (const f of textes) {
   }
 }
 for (const d of externes) if (!DOMAINES_AUTORISES.includes(d)) avertissements.push(`Ressource externe non prévue : ${d}`);
+
+// --- JavaScript : une erreur de syntaxe bloque tout le fichier (demos inertes, formulaires envoyes dans l'adresse) ---
+const syntaxe = (code, ou) => {
+  try {
+    new Script(code, { filename: ou });
+  } catch (e) {
+    erreurs.push(`${ou} : erreur de syntaxe JavaScript (${e.message}) : tout le script est ignoré par le navigateur.`);
+  }
+};
+for (const f of fichiers.filter((x) => x.endsWith(".js"))) syntaxe(readFileSync(f, "utf8"), rel(f));
+for (const p of pages) {
+  const scripts = [...readFileSync(p, "utf8").matchAll(/<script(?![^>]*\bsrc=)(?![^>]*type=["'](?:application\/ld\+json|importmap|module)["'])[^>]*>([\s\S]*?)<\/script>/gi)];
+  scripts.forEach((m, i) => m[1].trim() && syntaxe(m[1], `${rel(p)} (script intégré ${i + 1})`));
+}
+
+// --- Emojis utilises comme icones (interdits par le prompt systeme : icones en SVG) ---
+const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}]/gu;
+for (const f of textes.filter((x) => /\.(html|js)$/.test(x))) {
+  const vus = [...new Set(readFileSync(f, "utf8").match(EMOJI) || [])];
+  if (vus.length) avertissements.push(`${rel(f)} : ${vus.length} emoji(s) utilisé(s) (${vus.join(" ")}) : les icônes doivent être en SVG.`);
+}
 
 // --- Pages : formulaires sans demo, balises SEO, WhatsApp, pied de page ---
 const cahier = existsSync(join(DOSSIER, "CAHIER_DES_CHARGES.md")) ? readFileSync(join(DOSSIER, "CAHIER_DES_CHARGES.md"), "utf8") : "";
@@ -118,7 +147,7 @@ for (const p of pages) {
 }
 
 // --- Rapport ---
-console.log(`Vérification de ${slug}/site : ${pages.length} page(s) (${pages.map(rel).join(", ")}), ${fichiers.length} fichier(s)`);
+console.log(`Vérification de ${slug}/${sortie} : ${pages.length} page(s) (${pages.map(rel).join(", ")}), ${fichiers.length} fichier(s)`);
 console.log(`Démos (data-demo) : ${demos.size ? [...demos].join(", ") : "aucune"}`);
 console.log(`Ressources externes : ${externes.size ? [...externes].join(", ") : "aucune"}`);
 if (erreurs.length) console.log(`\n✗ ${erreurs.length} erreur(s) :\n${erreurs.map((e) => `  - ${e}`).join("\n")}`);

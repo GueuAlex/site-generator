@@ -34,6 +34,7 @@ npm install
 Copiez `.env.example` en `.env` (Windows : `copy .env.example .env` ; Linux : `cp .env.example .env`), puis ouvrez `.env` et remplissez :
 
 - **`MOONSHOT_API_KEY`** : votre clé Kimi personnelle (console : https://platform.kimi.ai, rubrique API Keys). Elle ne doit jamais être partagée ni ajoutée au dépôt : `.env` est ignoré par git.
+- **`DEEPSEEK_API_KEY`** : votre clé DeepSeek personnelle, transmise en privé. Elle permet de construire un site avec DeepSeek au lieu de Kimi (`--fournisseur deepseek`).
 - **`PROSPECTS_XLSX`** : le chemin de votre copie synchronisée du fichier Excel de prospection, sans guillemets. Exemple Windows : `PROSPECTS_XLSX=C:/Users/vous/OneDrive/Prospection.xlsx`.
 
 Vérifiez que tout répond :
@@ -42,9 +43,10 @@ Vérifiez que tout répond :
 node scripts/prospect.mjs --liste
 node scripts/kimi.mjs modeles
 node scripts/conso.mjs
+node scripts/kimi.mjs modeles --fournisseur deepseek
 ```
 
-La première commande liste les prospects. La deuxième doit citer `kimi-k3.1-pro`, et la troisième affiche votre solde Kimi.
+La première commande liste les prospects. La deuxième doit citer `kimi-k3.1-pro`, la troisième affiche vos soldes Kimi et DeepSeek, et la quatrième doit citer `deepseek-v4-pro` (si vous avez une clé DeepSeek).
 
 ## 4. Travailler
 
@@ -80,4 +82,5 @@ Vos sites, votre `.env`, votre suivi et vos livraisons ne sont pas touchés : gi
 - **« Navigateur introuvable »** pendant les captures : ajoutez `CHROME_PATH=<chemin de chrome.exe ou msedge.exe>` dans `.env`.
 - **`MOONSHOT_API_KEY absente`** : le fichier s'appelle bien `.env` (et non `.env.txt`) et se trouve à la racine du kit.
 - **Réponse de Kimi coupée** : le script reprend automatiquement jusqu'à 3 fois. Si rien n'est écrit, relancez la commande plus tard.
-- **Solde Kimi épuisé** : `node scripts/conso.mjs` affiche le solde ; rechargez votre compte sur la console Kimi.
+- **Solde épuisé** : `node scripts/conso.mjs` affiche les soldes Kimi et DeepSeek ; rechargez le compte concerné sur sa console.
+- **Tester DeepSeek** (facultatif) : ajoutez `DEEPSEEK_API_KEY` dans `.env`, puis `node scripts/kimi.mjs modeles --fournisseur deepseek` doit citer `deepseek-v4-pro`.

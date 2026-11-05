@@ -1,17 +1,20 @@
 #!/usr/bin/env node
-// Appels a Kimi (API Moonshot, compatible OpenAI) pour construire ou corriger un site.
+// Appels a l'IA qui construit ou corrige un site : Kimi par defaut, DeepSeek en option (API compatibles OpenAI).
 //
-//   node scripts/kimi.mjs build <slug> [--forcer] [--simuler <fichier>]
-//   node scripts/kimi.mjs fix <slug> "<retours>" [--simuler <fichier>]
-//   node scripts/kimi.mjs modeles
+//   node scripts/kimi.mjs build <slug> [--fournisseur kimi|deepseek] [--sortie site-xxx] [--forcer] [--simuler <fichier>]
+//   node scripts/kimi.mjs fix <slug> "<retours>" [--fournisseur kimi|deepseek] [--sortie site-xxx] [--simuler <fichier>]
+//   node scripts/kimi.mjs modeles [--fournisseur kimi|deepseek]
 //
+// --fournisseur : kimi (defaut, ou IA_FOURNISSEUR du .env) ou deepseek ; reglages dans scripts/fournisseurs.mjs.
+// --sortie : dossier du site genere (defaut : site), ex. site-deepseek pour comparer deux versions sans ecraser la premiere.
 // --simuler <fichier> : utilise une reponse enregistree au lieu d'appeler l'API (tests, cout nul).
 // --forcer : build meme si le cahier n'est pas marque « Validé : oui ».
-// Configuration dans le fichier .env a la racine du kit (voir .env.example). Doc API : https://platform.kimi.ai/docs
+// Configuration dans le fichier .env a la racine du kit (voir .env.example). Docs : https://platform.kimi.ai/docs et https://api-docs.deepseek.com
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cout as coutAppel, fournisseur } from "./fournisseurs.mjs";
 
 const RACINE = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PROMPT_SYSTEME = join(RACINE, "scripts", "kimi", "prompt-systeme.md");
@@ -49,28 +52,34 @@ const drapeau = (nom) => {
 };
 const fichierSimule = option("--simuler");
 const forcer = drapeau("--forcer");
+const idFournisseur = option("--fournisseur");
+const sortie = option("--sortie") || "site";
+if (!/^site(-[a-z0-9]+)*$/.test(sortie)) arreter("--sortie invalide : « site » ou « site-<nom> » (minuscules, chiffres, tirets).");
 const [commande, slug, retours] = args;
 
 // --- Configuration (.env) ----------------------------------------------------
 const cheminEnv = join(RACINE, ".env");
 if (existsSync(cheminEnv)) process.loadEnvFile(cheminEnv);
+const idIA = (idFournisseur || process.env.IA_FOURNISSEUR || "kimi").toLowerCase();
+let IA;
+try {
+  IA = fournisseur(idIA);
+} catch (e) {
+  arreter(e.message);
+}
 const config = {
-  cle: process.env.MOONSHOT_API_KEY,
-  modele: process.env.KIMI_MODEL,
-  baseURL: process.env.KIMI_BASE_URL || "https://api.moonshot.ai/v1",
-  maxTokens: Number(process.env.KIMI_MAX_TOKENS || 131072),
+  cle: process.env[IA.cleEnv],
+  modele: IA.modele(),
+  baseURL: IA.baseURL(),
+  maxTokens: IA.maxTokens(),
   timeoutMin: Number(process.env.KIMI_TIMEOUT_MIN || 30),
-  // Prix par million de tokens
-  prixEntree: process.env.KIMI_PRICE_IN ? Number(process.env.KIMI_PRICE_IN) : null,
-  prixEntreeCache: process.env.KIMI_PRICE_CACHE_IN ? Number(process.env.KIMI_PRICE_CACHE_IN) : null,
-  prixSortie: process.env.KIMI_PRICE_OUT ? Number(process.env.KIMI_PRICE_OUT) : null,
-  devise: process.env.KIMI_DEVISE || "USD",
-  // Serie K3 : raisonnement toujours actif, "max" par defaut (tres long) ; low | high | max
-  effort: process.env.KIMI_REASONING_EFFORT || "low",
+  devise: "USD",
+  // Raisonnement toujours actif ; low | high | max (Kimi : "max" par defaut, tres long)
+  effort: IA.effort(),
 };
 
 async function client() {
-  if (!config.cle) arreter("MOONSHOT_API_KEY absente du .env (voir .env.example).");
+  if (!config.cle) arreter(`${IA.cleEnv} absente du .env (voir .env.example).`);
   const { default: OpenAI } = await import("openai");
   return new OpenAI({ apiKey: config.cle, baseURL: config.baseURL, timeout: config.timeoutMin * 60_000, maxRetries: 1 });
 }
@@ -127,24 +136,22 @@ function sauvegarderSite(dossierSite, dossierHistorique) {
 
 function copierAssets(dossier) {
   const source = join(dossier, "assets");
-  const cible = join(dossier, "site", "assets");
+  const cible = join(dossier, sortie, "assets");
   rmSync(cible, { recursive: true, force: true });
   if (existsSync(source)) cpSync(source, cible, { recursive: true });
 }
 
 // --- Cout --------------------------------------------------------------------
-function calculerCout(usage) {
-  const entree = usage?.prompt_tokens ?? 0;
-  const cache = usage?.prompt_tokens_details?.cached_tokens ?? 0;
-  const sortie = usage?.completion_tokens ?? 0;
-  const raisonnement = usage?.completion_tokens_details?.reasoning_tokens ?? 0;
-  let cout = null;
-  if (config.prixEntree != null && config.prixSortie != null) {
-    const prixCache = config.prixEntreeCache ?? config.prixEntree;
-    cout = ((entree - cache) * config.prixEntree + cache * prixCache + sortie * config.prixSortie) / 1_000_000;
-    cout = Math.round(cout * 10000) / 10000;
-  }
-  return { tokens: { entree, entree_cache: cache, sortie, raisonnement }, cout };
+function calculerCout(usage, date) {
+  const tokens = {
+    entree: usage?.prompt_tokens ?? 0,
+    entree_cache: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+    sortie: usage?.completion_tokens ?? 0,
+    raisonnement: usage?.completion_tokens_details?.reasoning_tokens ?? 0,
+  };
+  // Tarif du fournisseur au debut de l'appel (DeepSeek : heures creuses a moitie prix)
+  const { usd, prix } = coutAppel(idIA, config.modele, tokens, date);
+  return { tokens, cout: usd, remise: prix.remise };
 }
 
 function enregistrerCout(dossier, entree) {
@@ -155,15 +162,15 @@ function enregistrerCout(dossier, entree) {
   return liste.reduce((t, e) => t + (e.cout ?? 0), 0);
 }
 
-// --- Appel a Kimi ------------------------------------------------------------
+// --- Appel a l'IA -------------------------------------------------------------
 async function appeler(messages) {
   if (fichierSimule) {
     info(`Simulation : réponse lue dans ${fichierSimule} (aucun appel à l'API).`);
     return { texte: readFileSync(fichierSimule, "utf8"), finish: "stop", usage: null, modele: "simulation" };
   }
-  if (!config.modele) arreter("KIMI_MODEL absent du .env (ex. kimi-k3.1-pro ; vérifier avec « node scripts/kimi.mjs modeles »).");
+  if (!config.modele) arreter(`${IA.modeleEnv} absent du .env (vérifier l'identifiant avec « node scripts/kimi.mjs modeles --fournisseur ${idIA} »).`);
   const api = await client();
-  info(`Appel à ${config.modele}, raisonnement « ${config.effort} » (réponse en streaming, ${config.timeoutMin} min maximum)…`);
+  info(`Appel à ${IA.nom} (${config.modele}), raisonnement « ${config.effort} » (réponse en streaming, ${config.timeoutMin} min maximum)…`);
   const debut = Date.now();
   let texte = "";
   let raisonnement = 0;
@@ -175,7 +182,7 @@ async function appeler(messages) {
     const flux = await api.chat.completions.create({
       model: config.modele,
       messages,
-      max_completion_tokens: config.maxTokens,
+      [IA.paramLongueur]: config.maxTokens,
       reasoning_effort: config.effort,
       stream: true,
       stream_options: { include_usage: true },
@@ -232,7 +239,7 @@ function promptSysteme(cahier) {
   let prompt = readFileSync(PROMPT_SYSTEME, "utf8");
   const id = cahier.match(/Skill UI\/UX\s*:\**\s*`?([a-z0-9-]+)`?/i)?.[1];
   if (!id) {
-    avertir("Aucun skill UI/UX indiqué dans le cahier (ligne « Skill UI/UX : `<id>` ») : Kimi suit seulement le prompt système.");
+    avertir(`Aucun skill UI/UX indiqué dans le cahier (ligne « Skill UI/UX : \`<id>\` ») : ${IA.nom} suit seulement le prompt système.`);
     return prompt;
   }
   const chemin = join(DOSSIER_SKILLS, id, "SKILL.md");
@@ -258,13 +265,14 @@ function contenuLogo(dossier) {
   const fichiers = lister(join(dossier, "assets"));
   const parties = [];
   const image = fichiers.find((f) => LOGO_IMAGE.test(f));
-  if (image) {
+  if (image && !IA.vision()) avertir(`assets/${image} non envoyé : ${config.modele} ne lit pas les images (le logo SVG reste envoyé s'il existe).`);
+  else if (image) {
     const chemin = join(dossier, "assets", image);
     if (statSync(chemin).size <= TAILLE_MAX_IMAGE) {
       const type = image.toLowerCase().endsWith(".png") ? "png" : image.toLowerCase().endsWith(".webp") ? "webp" : "jpeg";
       parties.push({ type: "text", text: `Logo de l'établissement (assets/${image}), pour ajuster la palette :` });
       parties.push({ type: "image_url", image_url: { url: `data:image/${type};base64,${readFileSync(chemin).toString("base64")}` } });
-    } else avertir(`assets/${image} dépasse 4 Mo : non envoyé à Kimi.`);
+    } else avertir(`assets/${image} dépasse 4 Mo : non envoyé à ${IA.nom}.`);
   }
   const svg = fichiers.find((f) => /^logo\.svg$/i.test(f));
   if (svg && statSync(join(dossier, "assets", svg)).size < 60_000) {
@@ -299,31 +307,31 @@ async function construireOuCorriger() {
     consigne = "Construis le site complet décrit par ce cahier des charges, en respectant toutes les règles.";
   } else {
     if (!retours?.trim()) arreter('Retours manquants : node scripts/kimi.mjs fix <slug> "<retours>"');
-    const actuels = lister(join(dossier, "site")).filter((f) => !f.startsWith("assets/") && EXTENSIONS_AUTORISEES.has(extname(f).toLowerCase()));
-    if (actuels.length === 0) arreter(`${slug}/site/ est vide : lancer d'abord « build ».`);
-    const blocs = actuels.map((f) => `=== FILE: ${f} ===\n${readFileSync(join(dossier, "site", f), "utf8")}\n=== END FILE ===`).join("\n\n");
+    const actuels = lister(join(dossier, sortie)).filter((f) => !f.startsWith("assets/") && EXTENSIONS_AUTORISEES.has(extname(f).toLowerCase()));
+    if (actuels.length === 0) arreter(`${slug}/${sortie}/ est vide : lancer d'abord « build »${sortie === "site" ? "" : ` avec --sortie ${sortie}`}.`);
+    const blocs = actuels.map((f) => `=== FILE: ${f} ===\n${readFileSync(join(dossier, sortie, f), "utf8")}\n=== END FILE ===`).join("\n\n");
     consigne =
       `Voici les fichiers actuels du site :\n\n${blocs}\n\n` +
       `Retours à appliquer :\n${retours}\n\n` +
       "Renvoie UNIQUEMENT les fichiers modifiés, chacun en version complète, dans le même format de blocs. N'applique que ces retours, sans autre changement.";
   }
 
+  const parties = [
+    { type: "text", text: `Cahier des charges :\n\n${cahier}` },
+    { type: "text", text: `Fichiers disponibles dans assets/ :\n${listeAssets}` },
+    ...contenuLogo(dossier),
+    { type: "text", text: consigne },
+  ];
   const messages = [
     { role: "system", content: promptSysteme(cahier) },
-    {
-      role: "user",
-      content: [
-        { type: "text", text: `Cahier des charges :\n\n${cahier}` },
-        { type: "text", text: `Fichiers disponibles dans assets/ :\n${listeAssets}` },
-        ...contenuLogo(dossier),
-        { type: "text", text: consigne },
-      ],
-    },
+    // Sans image, un seul texte : accepte par tous les modeles, y compris ceux qui ne lisent pas les images
+    { role: "user", content: parties.some((p) => p.type !== "text") ? parties : parties.map((p) => p.text).join("\n\n") },
   ];
 
   // Appel, puis reprises si la reponse est coupee (limite de tokens) ou interrompue (flux coupe) :
   // on garde les fichiers complets et on demande seulement les suivants. Rien n'est ecrit si l'ensemble reste incomplet.
   const debut = Date.now();
+  const dateAppel = new Date();
   const historique = join(dossier, ".historique", horodatage());
   mkdirSync(historique, { recursive: true });
   const appels = [];
@@ -370,7 +378,7 @@ async function construireOuCorriger() {
   const reponse = { ...derniere, texte: cumul };
 
   const { usage: usageTotal, estime } = cumulerUsages(appels);
-  const { tokens, cout } = calculerCout(usageTotal);
+  const { tokens, cout, remise } = calculerCout(usageTotal, dateAppel);
   const { fichiers, rejetes } = extraireFichiers(cumul);
   let statut = "ecrit";
   if (!termine) statut = derniere.erreur ? "interrompu" : "coupe";
@@ -378,7 +386,7 @@ async function construireOuCorriger() {
   if (fichierSimule) statut = statut === "ecrit" ? "simule" : statut;
 
   if (statut === "ecrit" || statut === "simule") {
-    const dossierSite = join(dossier, "site");
+    const dossierSite = join(dossier, sortie);
     const sauvegarde = sauvegarderSite(dossierSite, historique);
     if (commande === "build") rmSync(dossierSite, { recursive: true, force: true });
     for (const f of fichiers) {
@@ -393,12 +401,15 @@ async function construireOuCorriger() {
   const total = enregistrerCout(dossier, {
     date: new Date().toISOString(),
     commande,
+    fournisseur: idIA,
     modele: reponse.modele,
+    ...(sortie !== "site" ? { sortie } : {}),
     ...(commande === "fix" ? { retours } : {}),
     tokens,
     ...(estime ? { tokens_estimes: true } : {}),
     cout,
     devise: config.devise,
+    ...(remise ? { remise } : {}),
     duree_s: duree,
     tentatives: appels.length,
     finish_reason: reponse.finish,
@@ -412,10 +423,10 @@ async function construireOuCorriger() {
   if (statut === "coupe") console.log(`✗ Réponse COUPÉE par la limite de tokens (finish_reason: length), même après ${appels.length - 1} reprise(s) : rien n'a été écrit.`);
   else if (statut === "interrompu") console.log(`✗ Réponse INTERROMPUE (${reponse.erreur}) après ${appels.length} tentative(s) : rien n'a été écrit.`);
   else if (statut === "vide") console.log("✗ Aucun bloc « === FILE: … === » exploitable dans la réponse : rien n'a été écrit.");
-  else console.log(`✓ ${fichiers.length} fichier(s) écrit(s) dans ${slug}/site/ : ${fichiers.map((f) => f.chemin).join(", ")}`);
+  else console.log(`✓ ${fichiers.length} fichier(s) écrit(s) dans ${slug}/${sortie}/ par ${IA.nom} : ${fichiers.map((f) => f.chemin).join(", ")}`);
   for (const r of rejetes) avertir(`Bloc ignoré (chemin refusé) : ${r}`);
   console.log(`  Tokens : ${tokens.entree} en entrée (dont ${tokens.entree_cache} en cache), ${tokens.sortie} en sortie (dont ${tokens.raisonnement} de raisonnement)${estime ? " — en partie estimés (flux coupé)" : ""} · ${appels.length} tentative(s)`);
-  console.log(`  Coût   : ${cout == null ? "non calculé (prix absents du .env)" : `${cout} ${config.devise}`} · total du site : ${Math.round(total * 10000) / 10000} ${config.devise}`);
+  console.log(`  Coût   : ${cout} ${config.devise} (tarif ${IA.nom}${remise ? `, ${remise}` : ""}) · total du site : ${Math.round(total * 10000) / 10000} ${config.devise}`);
   console.log(`  Durée  : ${duree} s · réponse brute : ${relative(RACINE, historique)}/reponse-${commande}.txt`);
   if (statut !== "ecrit" && statut !== "simule") process.exit(2);
 }
@@ -424,7 +435,7 @@ async function construireOuCorriger() {
 try {
   if (commande === "modeles") await modeles();
   else if (commande === "build" || commande === "fix") await construireOuCorriger();
-  else arreter('Usage : node scripts/kimi.mjs build <slug> | fix <slug> "<retours>" | modeles');
+  else arreter('Usage : node scripts/kimi.mjs build <slug> | fix <slug> "<retours>" | modeles [--fournisseur kimi|deepseek] [--sortie site-xxx]');
 } catch (e) {
-  arreter(`Erreur de l'API Kimi : ${e?.status ? `${e.status} ` : ""}${e?.message ?? e}`);
+  arreter(`Erreur de l'API ${IA.nom} : ${e?.status ? `${e.status} ` : ""}${e?.message ?? e}`);
 }

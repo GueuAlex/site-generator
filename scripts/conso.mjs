@@ -1,48 +1,45 @@
 #!/usr/bin/env node
-// Consommation de l'API Kimi : solde reel du compte et detail des appels enregistres dans */couts.json.
+// Consommation des IA qui construisent les sites (Kimi, DeepSeek) : solde reel de chaque compte
+// et detail des appels enregistres dans */couts.json.
 //   node scripts/conso.mjs
-// Le solde vient de l'API (GET /v1/users/me/balance, doc : https://platform.kimi.ai/docs/api/balance.md).
-// Le detail par appel est celui que scripts/kimi.mjs enregistre ; le cout est estime avec les prix du .env,
-// ou a defaut avec les prix publics de kimi-k3.1-pro (USD par million de tokens), sans les frais d'ecriture du cache.
-// Le detail officiel par jour et par cle demande une cle Admin (sk-admin-*, scope billing:read) : non gere ici.
+// Soldes et tarifs : voir scripts/fournisseurs.mjs. Le cout d'un appel est celui que scripts/kimi.mjs a enregistre,
+// ou a defaut une estimation au tarif public de son fournisseur, sans les frais d'ecriture du cache.
+// Le detail officiel par cle Kimi (toute l'equipe) demande une cle Admin Kimi : non gere ici.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { FOURNISSEURS, cout } from "./fournisseurs.mjs";
 
 const RACINE = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cheminEnv = join(RACINE, ".env");
 if (existsSync(cheminEnv)) process.loadEnvFile(cheminEnv);
 
-const prix = {
-  entree: Number(process.env.KIMI_PRICE_IN || 2),
-  cache: Number(process.env.KIMI_PRICE_CACHE_IN || 0.2),
-  sortie: Number(process.env.KIMI_PRICE_OUT || 10),
-};
-const prixDuEnv = Boolean(process.env.KIMI_PRICE_IN && process.env.KIMI_PRICE_OUT);
-const baseURL = process.env.KIMI_BASE_URL || "https://api.moonshot.ai/v1";
-
-// Estimation d'un appel (tokens d'entree hors cache, entree en cache, sortie)
-function estimer(t) {
-  const cache = t.entree_cache || 0;
-  return ((t.entree - cache) * prix.entree + cache * prix.cache + t.sortie * prix.sortie) / 1e6;
+// Cout d'un appel : celui enregistre par kimi.mjs, sinon estime au tarif du fournisseur a la date de l'appel
+function estimer(a) {
+  if (typeof a.cout === "number" && a.modele !== "simulation") return a.cout;
+  return cout(a.fournisseur || "kimi", a.modele, a.tokens, new Date(a.date)).usd;
 }
 
 const usd = (n) => `${n.toFixed(2)} $`;
 const milliers = (n) => n.toLocaleString("fr-FR");
 
-// --- Solde reel du compte ---
-async function solde() {
-  if (!process.env.MOONSHOT_API_KEY) return console.log("Solde : MOONSHOT_API_KEY absente du .env.");
-  try {
-    const rep = await fetch(`${baseURL}/users/me/balance`, { headers: { Authorization: `Bearer ${process.env.MOONSHOT_API_KEY}` } });
-    const json = await rep.json();
-    if (!rep.ok || json.code !== 0) return console.log(`Solde : réponse inattendue (HTTP ${rep.status}${json.error?.message ? `, ${json.error.message}` : ""}).`);
-    const d = json.data;
-    console.log("Solde du compte Kimi (API)");
-    console.log(`  Disponible : ${usd(d.available_balance)}  (espèces ${usd(d.cash_balance)}, bons ${usd(d.voucher_balance)})\n`);
-  } catch (e) {
-    console.log(`Solde : API injoignable (${e.cause?.code || e.message}).\n`);
+// --- Solde reel de chaque compte (fournisseurs dont la cle est dans .env) ---
+async function soldes() {
+  console.log("Soldes des comptes");
+  for (const [id, f] of Object.entries(FOURNISSEURS)) {
+    const cle = process.env[f.cleEnv];
+    if (!cle) {
+      console.log(`  ${f.nom.padEnd(9)} : ${f.cleEnv} absente du .env`);
+      continue;
+    }
+    try {
+      const s = await f.solde(cle);
+      console.log(`  ${f.nom.padEnd(9)} : ${s.disponible.toFixed(2)} ${s.devise === "USD" ? "$" : s.devise}  (${s.detail})`);
+    } catch (e) {
+      console.log(`  ${f.nom.padEnd(9)} : solde illisible (${e.cause?.code || e.message})`);
+    }
   }
+  console.log("");
 }
 
 // --- Appels enregistres par site ---
@@ -56,9 +53,10 @@ function appels() {
   const parCommande = {};
   for (const site of sites) {
     const liste = JSON.parse(readFileSync(join(RACINE, site, "couts.json"), "utf8"));
-    const s = { appels: liste.length, entree: 0, cache: 0, sortie: 0, cout: 0, estime: false };
+    const s = { appels: liste.length, entree: 0, cache: 0, sortie: 0, cout: 0, estime: false, ia: new Set() };
     for (const a of liste) {
-      const c = estimer(a.tokens);
+      const c = estimer(a);
+      s.ia.add(FOURNISSEURS[a.fournisseur || "kimi"]?.nom || a.fournisseur);
       s.entree += a.tokens.entree;
       s.cache += a.tokens.entree_cache || 0;
       s.sortie += a.tokens.sortie;
@@ -66,7 +64,7 @@ function appels() {
       s.estime ||= Boolean(a.tokens_estimes);
       total.raisonnement += a.tokens.raisonnement || 0;
       total.duree += a.duree_s || 0;
-      const k = `${a.commande} (${a.statut})`;
+      const k = `${FOURNISSEURS[a.fournisseur || "kimi"]?.nom || a.fournisseur} ${a.commande} (${a.statut})`;
       parCommande[k] = parCommande[k] || { n: 0, cout: 0 };
       parCommande[k].n += 1;
       parCommande[k].cout += c;
@@ -76,21 +74,21 @@ function appels() {
     total.cache += s.cache;
     total.sortie += s.sortie;
     total.cout += s.cout;
-    lignes.push([site, s.appels, milliers(s.entree), milliers(s.cache), milliers(s.sortie), usd(s.cout) + (s.estime ? " *" : "")]);
+    lignes.push([site, [...s.ia].join(", "), s.appels, milliers(s.entree), milliers(s.cache), milliers(s.sortie), usd(s.cout) + (s.estime ? " *" : "")]);
   }
 
   console.log(`Appels enregistrés par scripts/kimi.mjs (${sites.length} site(s))`);
-  const entetes = ["Site", "Appels", "Entrée", "dont cache", "Sortie", "Coût estimé"];
+  const entetes = ["Site", "IA", "Appels", "Entrée", "dont cache", "Sortie", "Coût"];
   const larg = entetes.map((e, i) => Math.max(e.length, ...lignes.map((l) => String(l[i]).length)));
-  const fmt = (l) => "  " + l.map((v, i) => (i === 0 ? String(v).padEnd(larg[i]) : String(v).padStart(larg[i]))).join("   ");
+  const fmt = (l) => "  " + l.map((v, i) => (i <= 1 ? String(v).padEnd(larg[i]) : String(v).padStart(larg[i]))).join("   ");
   console.log(fmt(entetes));
   lignes.forEach((l) => console.log(fmt(l)));
-  console.log(fmt(["TOTAL", total.appels, milliers(total.entree), milliers(total.cache), milliers(total.sortie), usd(total.cout)]));
+  console.log(fmt(["TOTAL", "", total.appels, milliers(total.entree), milliers(total.cache), milliers(total.sortie), usd(total.cout)]));
   console.log(`\n  Raisonnement : ${milliers(total.raisonnement)} tokens (compris dans la sortie) · durée cumulée : ${Math.round(total.duree / 60)} min`);
   console.log("  Par commande : " + Object.entries(parCommande).map(([k, v]) => `${k} ${v.n} appel(s), ${usd(v.cout)}`).join(" · "));
-  console.log(`  Prix utilisés (USD par million de tokens) : entrée ${prix.entree}, entrée en cache ${prix.cache}, sortie ${prix.sortie}${prixDuEnv ? " (.env)" : " (prix publics par défaut, .env vide)"}`);
+  console.log("  Tarifs : prix publics de chaque fournisseur (scripts/fournisseurs.mjs), ou prix du .env ; DeepSeek à moitié prix en heures creuses.");
   console.log("  * tokens en partie estimés (flux coupé puis repris). Les frais d'écriture du cache ne sont pas comptés.");
 }
 
-await solde();
+await soldes();
 appels();

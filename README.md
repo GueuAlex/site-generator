@@ -59,6 +59,7 @@ Coût indicatif constaté : environ **0,30 à 0,70 $ par construction** et **0,2
 | **Git** | récupérer le kit et ses mises à jour (`git pull`) ; sous Windows, Git for Windows fournit aussi le terminal Bash utilisé par Claude Code |
 | **Google Chrome** (ou Edge, ou Chromium) | captures d'écran pour vérifier le rendu |
 | **Kimi** (API Moonshot, `https://api.moonshot.ai/v1`) | modèle `kimi-k3.1-pro`, une clé par personne |
+| **DeepSeek** (`https://api.deepseek.com`, en test) | modèle `deepseek-v4-pro` ou `deepseek-flash`, choisi avec `--fournisseur deepseek` (facultatif) |
 
 ---
 
